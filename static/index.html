@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>WebShell</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@6/css/xterm.min.css">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #1a1a2e; color: #eee; }
+        #auth-page {
+            display: flex; justify-content: center; align-items: center;
+            min-height: 100vh; padding: 20px;
+        }
+        .auth-box {
+            background: #16213e; border-radius: 12px; padding: 40px;
+            width: 100%; max-width: 400px; box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+        }
+        .auth-box h1 { text-align: center; margin-bottom: 8px; font-size: 28px; }
+        .auth-box p { text-align: center; color: #888; margin-bottom: 24px; }
+        .form-group { margin-bottom: 16px; }
+        .form-group label { display: block; margin-bottom: 6px; font-size: 14px; color: #aaa; }
+        .form-group input {
+            width: 100%; padding: 12px; border: 1px solid #333; border-radius: 8px;
+            background: #0f3460; color: #eee; font-size: 16px; outline: none;
+        }
+        .form-group input:focus { border-color: #e94560; }
+        .btn {
+            width: 100%; padding: 12px; border: none; border-radius: 8px;
+            font-size: 16px; cursor: pointer; transition: all 0.2s;
+        }
+        .btn-primary { background: #e94560; color: #fff; }
+        .btn-primary:hover { background: #c73e54; }
+        .error { color: #e94560; font-size: 14px; margin-top: 8px; text-align: center; }
+        .success { color: #4ecca3; font-size: 14px; margin-top: 8px; text-align: center; }
+        .toggle-link { text-align: center; margin-top: 16px; }
+        .toggle-link a { color: #e94560; cursor: pointer; text-decoration: none; }
+        .toggle-link a:hover { text-decoration: underline; }
+        #shell-page { display: none; height: 100vh; flex-direction: column; }
+        .toolbar {
+            display: flex; justify-content: space-between; align-items: center;
+            padding: 6px 12px; background: #0f3460; border-bottom: 1px solid #333;
+            flex-shrink: 0;
+        }
+        .toolbar span { font-size: 13px; color: #aaa; }
+        .toolbar button {
+            padding: 5px 12px; border: 1px solid #e94560; border-radius: 6px;
+            background: transparent; color: #e94560; cursor: pointer; font-size: 12px;
+            margin-left: 6px;
+        }
+        .toolbar button:hover { background: #e94560; color: #fff; }
+
+        /* Virtual keyboard bar */
+        .keybar {
+            display: flex; gap: 4px; padding: 6px 8px;
+            background: #0a0a1a; border-top: 1px solid #333;
+            overflow-x: auto; flex-shrink: 0;
+            -webkit-overflow-scrolling: touch;
+            scrollbar-width: none;
+        }
+        .keybar::-webkit-scrollbar { display: none; }
+        .keybar button {
+            flex-shrink: 0;
+            padding: 6px 10px; border: 1px solid #333; border-radius: 6px;
+            background: #16213e; color: #ccc; font-size: 12px;
+            font-family: 'Menlo, Monaco, Consolas, monospace';
+            cursor: pointer; white-space: nowrap;
+            min-height: 34px; min-width: 36px;
+            display: flex; align-items: center; justify-content: center;
+            transition: background 0.15s;
+            user-select: none; -webkit-user-select: none;
+        }
+        .keybar button:active { background: #e94560; color: #fff; }
+        .keybar .key-ctrl { color: #e94560; border-color: #e9456044; }
+        .keybar .key-arrow { color: #4ecca3; border-color: #4ecca344; }
+        .keybar .key-fn { color: #f0a500; border-color: #f0a50044; }
+
+        #terminal { flex: 1; overflow: hidden; }
+
+        /* Desktop: hide keybar by default, show with toggle */
+        @media (min-width: 769px) {
+            .keybar { display: none; }
+            .keybar.show { display: flex; }
+            .toolbar .kb-toggle { display: inline-block; }
+        }
+        /* Mobile: always show keybar */
+        @media (max-width: 768px) {
+            .keybar { display: flex !important; }
+            .toolbar .kb-toggle { display: none; }
+        }
+    </style>
+</head>
+<body>
+
+<div id="auth-page">
+    <div class="auth-box">
+        <h1>🖥️ WebShell</h1>
+        <p id="form-subtitle">登录以访问终端</p>
+        <div id="error-msg" class="error"></div>
+        <div id="success-msg" class="success"></div>
+
+        <div id="login-form">
+            <div class="form-group">
+                <label>用户名</label>
+                <input type="text" id="login-username" placeholder="请输入用户名">
+            </div>
+            <div class="form-group">
+                <label>密码</label>
+                <input type="password" id="login-password" placeholder="请输入密码">
+            </div>
+            <button class="btn btn-primary" onclick="doLogin()">登 录</button>
+        </div>
+
+        <div id="change-pw-form" style="display:none;">
+            <div class="form-group">
+                <label>旧密码</label>
+                <input type="password" id="old-pw" placeholder="当前密码">
+            </div>
+            <div class="form-group">
+                <label>新密码</label>
+                <input type="password" id="new-pw" placeholder="新密码">
+            </div>
+            <button class="btn btn-primary" onclick="doChangePassword()">修改密码</button>
+            <div class="toggle-link">
+                <a onclick="hideChangePassword()">返回终端</a>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div id="shell-page">
+    <div class="toolbar">
+        <span id="user-info">用户: -</span>
+        <div>
+            <button class="kb-toggle" onclick="toggleKeybar()">⌨️ 按键栏</button>
+            <button onclick="showChangePassword()">修改密码</button>
+            <button onclick="doLogout()">退出登录</button>
+        </div>
+    </div>
+    <div class="keybar" id="keybar">
+        <button class="key-ctrl" onclick="sendKey('Tab')">Tab</button>
+        <button class="key-ctrl" onclick="sendCtrl('c')">Ctrl+C</button>
+        <button class="key-ctrl" onclick="sendCtrl('d')">Ctrl+D</button>
+        <button class="key-ctrl" onclick="sendCtrl('l')">Ctrl+L</button>
+        <button class="key-ctrl" onclick="sendCtrl('z')">Ctrl+Z</button>
+        <button class="key-ctrl" onclick="sendCtrl('a')">Ctrl+A</button>
+        <button class="key-ctrl" onclick="sendCtrl('e')">Ctrl+E</button>
+        <button class="key-ctrl" onclick="sendKey('Esc')">Esc</button>
+        <button class="key-arrow" onclick="sendKey('ArrowUp')">↑</button>
+        <button class="key-arrow" onclick="sendKey('ArrowDown')">↓</button>
+        <button class="key-arrow" onclick="sendKey('ArrowLeft')">←</button>
+        <button class="key-arrow" onclick="sendKey('ArrowRight')">→</button>
+        <button onclick="sendKey('Home')">Home</button>
+        <button onclick="sendKey('End')">End</button>
+        <button class="key-fn" onclick="sendSeq('[5~')">PgUp</button>
+        <button class="key-fn" onclick="sendSeq('[6~')">PgDn</button>
+        <button class="key-fn" onclick="sendSeq('OP')">F1</button>
+        <button class="key-fn" onclick="sendSeq('OQ')">F2</button>
+        <button class="key-fn" onclick="sendSeq('OR')">F3</button>
+        <button class="key-fn" onclick="sendSeq('OS')">F4</button>
+    </div>
+    <div id="terminal"></div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@6/lib/xterm.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.11.0/lib/addon-fit.min.js"></script>
+<script>
+let ws = null;
+let term = null;
+
+// --- Virtual Key Functions ---
+function sendKey(name) {
+    if (!term) return;
+    term.focus();
+    const seqMap = {
+        'Tab':     '\t',
+        'Esc':     '\x1b',
+        'ArrowUp':    '\x1b[A',
+        'ArrowDown':  '\x1b[B',
+        'ArrowRight': '\x1b[C',
+        'ArrowLeft':  '\x1b[D',
+        'Home':    '\x1b[H',
+        'End':     '\x1b[F',
+        'Delete':  '\x1b[3~',
+        'Insert':  '\x1b[2~',
+        'PageUp':  '\x1b[5~',
+        'PageDown':'\x1b[6~',
+    };
+    const seq = seqMap[name];
+    if (seq && ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(new TextEncoder().encode(seq));
+    }
+}
+
+function sendCtrl(ch) {
+    if (!term) return;
+    term.focus();
+    // Ctrl+A = 0x01, Ctrl+C = 0x03, etc.
+    const code = ch.charCodeAt(0) - 96;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(new Uint8Array([code]));
+    }
+}
+
+function sendSeq(suffix) {
+    if (!term) return;
+    term.focus();
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(new TextEncoder().encode('\x1b' + suffix));
+    }
+}
+
+function toggleKeybar() {
+    document.getElementById('keybar').classList.toggle('show');
+}
+
+// --- UI Helpers ---
+function clearMsgs() {
+    document.getElementById('error-msg').textContent = '';
+    document.getElementById('success-msg').textContent = '';
+}
+function showError(msg) { document.getElementById('error-msg').textContent = msg; }
+function showSuccess(msg) { document.getElementById('success-msg').textContent = msg; }
+
+function showChangePassword() {
+    clearMsgs();
+    document.getElementById('auth-page').style.display = 'flex';
+    document.getElementById('shell-page').style.display = 'none';
+    document.getElementById('login-form').style.display = 'none';
+    document.getElementById('change-pw-form').style.display = 'block';
+    document.getElementById('form-subtitle').textContent = '修改密码';
+    if (term) { term.dispose(); term = null; }
+    if (ws) { ws.close(); ws = null; }
+}
+
+function hideChangePassword() {
+    startShell();
+}
+
+async function apiFetch(url, body) {
+    const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+    });
+    const text = await res.text();
+    let data;
+    try { data = JSON.parse(text); } catch { data = { message: text }; }
+    if (!res.ok) throw new Error(data.message || 'Request failed');
+    return data;
+}
+
+async function doLogin() {
+    clearMsgs();
+    const username = document.getElementById('login-username').value.trim();
+    const password = document.getElementById('login-password').value;
+    if (!username || !password) return showError('请填写用户名和密码');
+
+    try {
+        const data = await apiFetch('./api/login', { username, password });
+        localStorage.setItem('token', data.token);
+        localStorage.setItem('username', data.username);
+        startShell();
+    } catch (e) { showError(e.message); }
+}
+
+async function doChangePassword() {
+    clearMsgs();
+    const username = localStorage.getItem('username');
+    const old_password = document.getElementById('old-pw').value;
+    const new_password = document.getElementById('new-pw').value;
+    if (!old_password || !new_password) return showError('请填写所有字段');
+
+    try {
+        await apiFetch('./api/change-password', { username, old_password, new_password });
+        showSuccess('密码修改成功！3秒后返回终端...');
+        setTimeout(() => hideChangePassword(), 3000);
+    } catch (e) { showError(e.message); }
+}
+
+function doLogout() {
+    localStorage.removeItem('token');
+    localStorage.removeItem('username');
+    if (term) { term.dispose(); term = null; }
+    if (ws) { ws.close(); ws = null; }
+    document.getElementById('auth-page').style.display = 'flex';
+    document.getElementById('shell-page').style.display = 'none';
+    document.getElementById('login-form').style.display = 'block';
+    document.getElementById('change-pw-form').style.display = 'none';
+    document.getElementById('form-subtitle').textContent = '登录以访问终端';
+}
+
+function startShell() {
+    const token = localStorage.getItem('token');
+    const username = localStorage.getItem('username');
+    if (!token) return doLogout();
+
+    document.getElementById('auth-page').style.display = 'none';
+    document.getElementById('shell-page').style.display = 'flex';
+    document.getElementById('user-info').textContent = '用户: ' + username;
+
+    if (term) term.dispose();
+    const fitAddon = new FitAddon.FitAddon();
+
+    term = new Terminal({
+        cursorBlink: true,
+        fontSize: 15,
+        fontFamily: 'Menlo, Monaco, Consolas, monospace',
+        theme: { background: '#1a1a2e', foreground: '#eee', cursor: '#e94560' }
+    });
+    term.loadAddon(fitAddon);
+    term.open(document.getElementById('terminal'));
+
+    // Fit after a short delay to ensure DOM is ready
+    setTimeout(() => {
+        fitAddon.fit();
+        term.focus();
+    }, 200);
+    window.addEventListener('resize', () => fitAddon.fit());
+
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    ws = new WebSocket(`${proto}//${location.host}/webshell/api/ws/shell?token=${token}`);
+    ws.binaryType = 'arraybuffer';
+
+    term.onData(data => {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(new TextEncoder().encode(data));
+        }
+    });
+
+    ws.onopen = () => {
+        console.log('WebSocket connected');
+        term.focus();
+    };
+
+    ws.onmessage = (e) => {
+        if (e.data instanceof ArrayBuffer) {
+            term.write(new Uint8Array(e.data));
+        } else {
+            term.write(e.data);
+        }
+    };
+
+    ws.onclose = (e) => {
+        console.log('WS closed:', e.code);
+        term.write('\r\n\x1b[31m[连接已断开]\x1b[0m\r\n');
+    };
+
+    ws.onerror = () => {
+        term.write('\r\n\x1b[31m[连接错误]\x1b[0m\r\n');
+    };
+}
+
+// Init
+(function() {
+    const token = localStorage.getItem('token');
+    if (token) {
+        startShell();
+    }
+})();
+</script>
+</body>
+</html>
