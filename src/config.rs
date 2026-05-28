@@ -30,3 +30,55 @@ impl Config {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_config_from_env_with_defaults() {
+        // 清除环境变量，确保使用默认值
+        std::env::remove_var("PORT");
+
+        // 设置必填的环境变量
+        std::env::set_var("DATABASE_URL", "postgres://test:test@localhost/test");
+        std::env::set_var("JWT_SECRET", "test-secret");
+
+        let config = Config::from_env();
+        assert_eq!(config.database_url, "postgres://test:test@localhost/test");
+        assert_eq!(config.jwt_secret, "test-secret");
+        assert_eq!(config.port, 3000);
+    }
+
+    #[test]
+    fn test_config_from_env_with_custom_port() {
+        std::env::set_var("DATABASE_URL", "postgres://localhost/db");
+        std::env::set_var("JWT_SECRET", "secret");
+        std::env::set_var("PORT", "8080");
+
+        let config = Config::from_env();
+        assert_eq!(config.port, 8080);
+
+        std::env::remove_var("PORT");
+    }
+
+    #[test]
+    fn test_config_from_env_with_invalid_port() {
+        std::env::set_var("DATABASE_URL", "postgres://localhost/db");
+        std::env::set_var("JWT_SECRET", "secret");
+        std::env::set_var("PORT", "invalid");
+
+        let config = Config::from_env();
+        assert_eq!(config.port, 3000); // 应该回退到默认值
+
+        std::env::remove_var("PORT");
+    }
+
+    #[test]
+    #[should_panic(expected = "DATABASE_URL environment variable is required")]
+    fn test_config_panics_without_database_url() {
+        std::env::remove_var("DATABASE_URL");
+        std::env::remove_var("JWT_SECRET");
+        Config::from_env();
+    }
+}

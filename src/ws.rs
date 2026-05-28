@@ -144,7 +144,7 @@ async fn handle_shell_socket(socket: WebSocket, username: String) {
     // 任务2: 读取子进程 stderr，发送到通道
     let stderr_task = tokio::spawn(async move {
         let mut reader = BufReader::new(stderr);
-        let mut buf = vec![0u8, 4096];
+        let mut buf = vec![0u8; 4096];
         loop {
             match reader.read(&mut buf).await {
                 Ok(0) => break,
@@ -206,4 +206,37 @@ async fn handle_shell_socket(socket: WebSocket, username: String) {
     // 杀死子进程，清理资源
     let _ = child.kill().await;
     tracing::info!("Shell session ended for user: {}", username);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ws_query_deserialization_with_token() {
+        let query = WsQuery {
+            token: Some("my-token".to_string()),
+        };
+        assert_eq!(query.token.unwrap(), "my-token");
+    }
+
+    #[test]
+    fn test_ws_query_deserialization_without_token() {
+        let query = WsQuery { token: None };
+        assert!(query.token.is_none());
+    }
+
+    #[test]
+    fn test_ws_query_from_json() {
+        let json = r#"{"token":"abc123"}"#;
+        let query: WsQuery = serde_json::from_str(json).unwrap();
+        assert_eq!(query.token.unwrap(), "abc123");
+    }
+
+    #[test]
+    fn test_ws_query_from_empty_json() {
+        let json = r#"{}"#;
+        let query: WsQuery = serde_json::from_str(json).unwrap();
+        assert!(query.token.is_none());
+    }
 }

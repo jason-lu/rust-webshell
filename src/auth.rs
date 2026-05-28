@@ -61,3 +61,60 @@ pub fn verify_token(token: &str, secret: &str) -> Option<Claims> {
     .ok()
     .map(|data| data.claims)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_create_and_verify_token() {
+        let secret = "test-secret-key";
+        let user_id = "user-123";
+        let username = "testuser";
+
+        // 创建 token
+        let token = create_token(user_id, username, secret);
+        assert!(!token.is_empty());
+
+        // 验证 token
+        let claims = verify_token(&token, secret);
+        assert!(claims.is_some());
+
+        let claims = claims.unwrap();
+        assert_eq!(claims.sub, user_id);
+        assert_eq!(claims.username, username);
+        assert!(claims.exp > 0);
+    }
+
+    #[test]
+    fn test_verify_token_with_wrong_secret() {
+        let secret = "correct-secret";
+        let wrong_secret = "wrong-secret";
+
+        let token = create_token("user-1", "testuser", secret);
+        let claims = verify_token(&token, wrong_secret);
+        assert!(claims.is_none());
+    }
+
+    #[test]
+    fn test_verify_invalid_token() {
+        let claims = verify_token("invalid-token", "secret");
+        assert!(claims.is_none());
+    }
+
+    #[test]
+    fn test_verify_empty_token() {
+        let claims = verify_token("", "secret");
+        assert!(claims.is_none());
+    }
+
+    #[test]
+    fn test_token_contains_correct_claims() {
+        let secret = "my-secret";
+        let token = create_token("uuid-abc", "alice", secret);
+
+        let claims = verify_token(&token, secret).unwrap();
+        assert_eq!(claims.sub, "uuid-abc");
+        assert_eq!(claims.username, "alice");
+    }
+}

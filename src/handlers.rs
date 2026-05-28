@@ -169,3 +169,71 @@ pub async fn change_password(
         message: "Password changed successfully".into(),
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_register_request_deserialization() {
+        let json = r#"{"username":"testuser","password":"testpass"}"#;
+        let req: RegisterRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.username, "testuser");
+        assert_eq!(req.password, "testpass");
+    }
+
+    #[test]
+    fn test_login_request_deserialization() {
+        let json = r#"{"username":"admin","password":"123456"}"#;
+        let req: LoginRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.username, "admin");
+        assert_eq!(req.password, "123456");
+    }
+
+    #[test]
+    fn test_change_password_request_deserialization() {
+        let json = r#"{
+            "username": "user1",
+            "old_password": "old123",
+            "new_password": "new456"
+        }"#;
+        let req: ChangePasswordRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.username, "user1");
+        assert_eq!(req.old_password, "old123");
+        assert_eq!(req.new_password, "new456");
+    }
+
+    #[test]
+    fn test_auth_response_serialization() {
+        let resp = AuthResponse {
+            token: "jwt-token-123".to_string(),
+            username: "testuser".to_string(),
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("jwt-token-123"));
+        assert!(json.contains("testuser"));
+    }
+
+    #[test]
+    fn test_message_response_serialization() {
+        let resp = MessageResponse {
+            message: "Operation successful".to_string(),
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("Operation successful"));
+    }
+
+    #[test]
+    fn test_err_helper_function() {
+        let (status, json_resp) = err(StatusCode::BAD_REQUEST, "Invalid input");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(json_resp.message, "Invalid input");
+    }
+
+    #[test]
+    fn test_missing_fields_in_request() {
+        let json = r#"{"username":"test"}"#;
+        let result = serde_json::from_str::<LoginRequest>(json);
+        assert!(result.is_err());
+    }
+}

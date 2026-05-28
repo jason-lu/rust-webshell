@@ -44,3 +44,15 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), sqlx::Error> {
     .await?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_pool_creation_with_invalid_url() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(init_pool("postgres://invalid:invalid@localhost:9999/nonexistent"));
+        assert!(result.is_err());
+    }
+}
