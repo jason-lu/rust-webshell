@@ -328,7 +328,10 @@ function startShell() {
         }
     });
 
+    let wsOpened = false;
+
     ws.onopen = () => {
+        wsOpened = true;
         console.log('WebSocket connected');
         term.focus();
     };
@@ -343,11 +346,42 @@ function startShell() {
 
     ws.onclose = (e) => {
         console.log('WS closed:', e.code);
-        term.write('\r\n\x1b[31m[连接已断开]\x1b[0m\r\n');
+        if (!wsOpened) {
+            // 连接未成功就断开，说明认证失败（token 过期或无效）
+            term.write('\r\n\x1b[31m[认证失败或 Token 已过期，正在返回登录页面...]\x1b[0m\r\n');
+            localStorage.removeItem('token');
+            localStorage.removeItem('username');
+            setTimeout(() => {
+                if (term) { term.dispose(); term = null; }
+                document.getElementById('auth-page').style.display = 'flex';
+                document.getElementById('shell-page').style.display = 'none';
+                document.getElementById('login-form').style.display = 'block';
+                document.getElementById('change-pw-form').style.display = 'none';
+                document.getElementById('form-subtitle').textContent = 'Token 已过期，请重新登录';
+                showError('会话已过期，请重新登录');
+            }, 2000);
+        } else {
+            term.write('\r\n\x1b[31m[连接已断开]\x1b[0m\r\n');
+        }
     };
 
     ws.onerror = () => {
-        term.write('\r\n\x1b[31m[连接错误]\x1b[0m\r\n');
+        if (!wsOpened) {
+            term.write('\r\n\x1b[31m[连接错误，正在返回登录页面...]\x1b[0m\r\n');
+            localStorage.removeItem('token');
+            localStorage.removeItem('username');
+            setTimeout(() => {
+                if (term) { term.dispose(); term = null; }
+                document.getElementById('auth-page').style.display = 'flex';
+                document.getElementById('shell-page').style.display = 'none';
+                document.getElementById('login-form').style.display = 'block';
+                document.getElementById('change-pw-form').style.display = 'none';
+                document.getElementById('form-subtitle').textContent = '连接失败，请重新登录';
+                showError('连接失败，请重新登录');
+            }, 2000);
+        } else {
+            term.write('\r\n\x1b[31m[连接错误]\x1b[0m\r\n');
+        }
     };
 }
 
