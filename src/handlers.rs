@@ -1,4 +1,4 @@
-use axum::{extract::State, http::StatusCode, Json};
+use axum::{extract::{Multipart, State}, http::{HeaderMap, StatusCode}, Json};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -167,6 +167,84 @@ pub async fn change_password(
 
     Ok(Json(MessageResponse {
         message: "Password changed successfully".into(),
+    }))
+}
+
+/// 文件上传处理器
+///
+/// 验证 JWT token 后，将 multipart 表单中的文件保存到 /root/uploads/
+///
+/// # 认证
+/// 需要在 Authorization 请求头中传递 Bearer token
+///
+/// # 参数
+/// - headers: 请求头（提取 Authorization）
+/// - multipart: multipart 表单数据
+///
+/// # 返回
+/// - 成功: "File uploaded: <filename>"
+/// - 失败: 401 Unauthorized、400 Bad Request 或 500 Internal Server Error
+pub async fn upload_file(
+    headers: HeaderMap,
+    mut multipart: Multipart,
+) -> Result<Json<MessageResponse>, (StatusCode, Json<MessageResponse>)> {
+    // 从 Authorization 头提取 Bearer token
+    let token = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .ok_or_else(|| err(StatusCode::UNAUTHORIZED, "Missing or invalid Authorization header"))?;
+
+    // 验证 JWT token
+    let config = crate::config::Config::from_env();
+    let _claims = auth::verify_token(token, &config.jwt_secret)
+        .ok_or_else(|| err(StatusCode::UNAUTHORIZED, "Invalid or expired token"))?;
+
+    // 从 multipart 表单中读取文件字段
+    let mut filename: Option<String> = None;
+    let mut data: Option<Vec<u8>> = None;
+
+    while let Some(field) = multipart.next_field().await.map_err(|e| {
+        err(StatusCode::BAD_REQUEST, &format!("Failed to read multipart field: {}", e))
+    })? {
+        let name = field.name().unwrap_or("").to_string();
+        if name == "file" || filename.is_none() {
+            filename = field.file_name().map(|s| s.to_string());
+            data = Some(field.bytes().await.map_err(|e| {
+                err(StatusCode::BAD_REQUEST, &format!("Failed to read file data: {}", e))
+            })?.to_vec());
+            if name == "file" {
+                break;
+            }
+        }
+    }
+
+    let filename = filename.ok_or_else(|| err(StatusCode::BAD_REQUEST, "No file provided"))?;
+    let data = data.ok_or_else(|| err(StatusCode::BAD_REQUEST, "No file data"))?;
+
+    // 防止路径遍历：只保留文件名部分
+    let safe_name = std::path::Path::new(&filename)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("upload")
+        .to_string();
+
+    // 创建上传目录
+    let upload_dir = "/root/uploads";
+    tokio::fs::create_dir_all(upload_dir).await.map_err(|e| {
+        err(StatusCode::INTERNAL_SERVER_ERROR, &format!("Failed to create upload dir: {}", e))
+    })?;
+
+    // 写入文件
+    let path = format!("{}/{}", upload_dir, safe_name);
+    tokio::fs::write(&path, &data).await.map_err(|e| {
+        err(StatusCode::INTERNAL_SERVER_ERROR, &format!("Failed to write file: {}", e))
+    })?;
+
+    tracing::info!("File uploaded: {} ({} bytes)", safe_name, data.len());
+
+    Ok(Json(MessageResponse {
+        message: format!("File uploaded: {}", safe_name),
     }))
 }
 

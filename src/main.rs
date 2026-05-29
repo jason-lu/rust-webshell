@@ -40,6 +40,7 @@ async fn main() {
         .route("/api/register", post(handlers::register))          // 注册（当前已禁用）
         .route("/api/login", post(handlers::login))                // 登录，返回 JWT
         .route("/api/change-password", post(handlers::change_password))  // 修改密码
+        .route("/api/upload", post(handlers::upload_file))              // 文件上传
         // WebSocket 终端接口
         .route("/api/ws/shell", get(ws::ws_shell_handler))
         // 静态文件服务（前端页面），作为兜底路由

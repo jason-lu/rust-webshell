@@ -134,7 +134,9 @@
         <div>
             <button class="kb-toggle" onclick="toggleKeybar()">⌨️ 按键栏</button>
             <button onclick="showChangePassword()">修改密码</button>
+            <button onclick="document.getElementById('file-input').click()">上传文件</button>
             <button onclick="doLogout()">退出登录</button>
+            <input type="file" id="file-input" style="display:none" onchange="doUpload(this)">
         </div>
     </div>
     <div class="keybar" id="keybar">
@@ -288,6 +290,32 @@ function doLogout() {
     document.getElementById('login-form').style.display = 'block';
     document.getElementById('change-pw-form').style.display = 'none';
     document.getElementById('form-subtitle').textContent = '登录以访问终端';
+}
+
+async function doUpload(input) {
+    const file = input.files[0];
+    if (!file) return;
+    input.value = ''; // 清空以便重复选择同一文件
+
+    const token = localStorage.getItem('token');
+    if (!token) return doLogout();
+
+    const formData = new FormData();
+    formData.append('file', file);
+
+    try {
+        const res = await fetch('./api/upload', {
+            method: 'POST',
+            headers: { 'Authorization': 'Bearer ' + token },
+            body: formData
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.message || 'Upload failed');
+        // 上传成功，在终端显示提示
+        if (term) term.write('\r\n\x1b[32m[上传成功] ' + data.message + '\x1b[0m\r\n');
+    } catch (e) {
+        if (term) term.write('\r\n\x1b[31m[上传失败] ' + e.message + '\x1b[0m\r\n');
+    }
 }
 
 function startShell() {
