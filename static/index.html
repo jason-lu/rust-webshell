@@ -295,10 +295,13 @@ function doLogout() {
 async function doUpload(input) {
     const file = input.files[0];
     if (!file) return;
-    input.value = ''; // 清空以便重复选择同一文件
+    input.value = '';
 
     const token = localStorage.getItem('token');
     if (!token) return doLogout();
+
+    const sizeMB = (file.size / 1024 / 1024).toFixed(1);
+    if (term) term.write('\r\n\x1b[36m[上传中] ' + file.name + ' (' + sizeMB + 'MB)...\x1b[0m');
 
     const formData = new FormData();
     formData.append('file', file);
@@ -309,9 +312,22 @@ async function doUpload(input) {
             headers: { 'Authorization': 'Bearer ' + token },
             body: formData
         });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.message || 'Upload failed');
-        // 上传成功，在终端显示提示
+
+        const text = await res.text();
+        let data;
+        try {
+            data = JSON.parse(text);
+        } catch {
+            if (res.status === 413) {
+                throw new Error('文件太大，服务器拒绝接收（最大 100MB）');
+            } else if (res.status === 401) {
+                throw new Error('登录已过期，请重新登录');
+            } else {
+                throw new Error('服务器错误 (HTTP ' + res.status + ')');
+            }
+        }
+
+        if (!res.ok) throw new Error(data.message || '上传失败');
         if (term) term.write('\r\n\x1b[32m[上传成功] ' + data.message + '\x1b[0m\r\n');
     } catch (e) {
         if (term) term.write('\r\n\x1b[31m[上传失败] ' + e.message + '\x1b[0m\r\n');
