@@ -1,4 +1,4 @@
-use axum::{extract::{Multipart, State}, http::{HeaderMap, StatusCode}, Json};
+use axum::{extract::{Request, State}, http::{HeaderMap, StatusCode}, Json, body::Body};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
@@ -187,7 +187,7 @@ pub async fn change_password(
 /// - 失败: 401 Unauthorized、400 Bad Request 或 500 Internal Server Error
 pub async fn upload_file(
     headers: HeaderMap,
-    mut multipart: Multipart,
+    request: Request<Body>,
 ) -> Result<Json<MessageResponse>, (StatusCode, Json<MessageResponse>)> {
     // 从 Authorization 头提取 Bearer token
     let token = headers
@@ -200,6 +200,18 @@ pub async fn upload_file(
     let config = crate::config::Config::from_env();
     let _claims = auth::verify_token(token, &config.jwt_secret)
         .ok_or_else(|| err(StatusCode::UNAUTHORIZED, "Invalid or expired token"))?;
+
+    // 从 Content-Type 提取 boundary
+    let content_type = headers
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+
+    // 使用 multer 直接解析请求体流
+    let body = request.into_body();
+    let stream = body.into_data_stream();
+    let mut multipart = multer::Multipart::new(stream, &content_type);
 
     // 从 multipart 表单中读取文件字段，流式写入磁盘
     let mut filename: Option<String> = None;

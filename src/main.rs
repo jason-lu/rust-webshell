@@ -7,6 +7,7 @@ mod ws;        // WebSocket 终端模块
 
 use axum::{
     Router,
+    extract::DefaultBodyLimit,
     routing::{get, post},
 };
 use tower_http::cors::CorsLayer;
@@ -47,6 +48,8 @@ async fn main() {
         .fallback_service(ServeDir::new("/usr/local/share/webshell/static"))
         // 允许跨域（开发时方便前端调用）
         .layer(CorsLayer::permissive())
+        // 禁用默认 body 大小限制（由 nginx 控制）
+        .layer(DefaultBodyLimit::disable())
         // 注入数据库连接池作为共享状态
         .with_state(pool);
 
