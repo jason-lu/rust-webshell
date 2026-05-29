@@ -208,11 +208,9 @@ pub async fn upload_file(
         .unwrap_or("")
         .to_string();
 
-    // 将请求体完整读入内存，再用 multer 解析
-    let body_bytes = axum::body::to_bytes(request.into_body(), 100 * 1024 * 1024).await.map_err(|e| {
-        err(StatusCode::BAD_REQUEST, &format!("Failed to read request body: {}", e))
-    })?;
-    let stream = futures_util::stream::once(async move { Ok::<_, std::io::Error>(body_bytes) });
+    // 使用 multer 直接解析请求体流
+    let body = request.into_body();
+    let stream = body.into_data_stream();
     let mut multipart = multer::Multipart::new(stream, &content_type);
 
     // 从 multipart 表单中读取文件字段，流式写入磁盘
