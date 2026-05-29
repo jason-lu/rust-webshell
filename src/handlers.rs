@@ -207,70 +207,87 @@ pub async fn upload_file(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_string();
+    let content_length = headers
+        .get("content-length")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("unknown")
+        .to_string();
 
-    // 使用 multer 直接解析请求体流
-    let body = request.into_body();
-    let stream = body.into_data_stream();
-    let mut multipart = multer::Multipart::new(stream, &content_type);
+    tracing::info!("Upload: content_type={}, content_length={}", content_type, content_length);
 
-    // 从 multipart 表单中读取文件字段，流式写入磁盘
-    let mut filename: Option<String> = None;
-    let mut file_written = false;
+    // 读取完整请求体
+    let body_bytes = axum::body::to_bytes(request.into_body(), 100 * 1024 * 1024).await.map_err(|e| {
+        tracing::error!("Body read failed: {}", e);
+        err(StatusCode::BAD_REQUEST, &format!("Failed to read request body: {}", e))
+    })?;
+    tracing::info!("Body received: {} bytes", body_bytes.len());
 
+    // 手动解析 multipart/form-data
+    let boundary = content_type
+        .split("boundary=")
+        .nth(1)
+        .unwrap_or("")
+        .trim_matches('"')
+        .to_string();
+
+    if boundary.is_empty() {
+        return Err(err(StatusCode::BAD_REQUEST, "Missing boundary in Content-Type"));
+    }
+
+    let boundary_delim = format!("--{}", boundary);
+    let body_str = String::from_utf8_lossy(&body_bytes);
+
+    // 找到文件部分：在 boundary 之间查找 filename
     let upload_dir = "/root/uploads";
     tokio::fs::create_dir_all(upload_dir).await.map_err(|e| {
         err(StatusCode::INTERNAL_SERVER_ERROR, &format!("Failed to create upload dir: {}", e))
     })?;
 
-    let mut total_bytes: u64 = 0;
     let mut safe_name = String::from("upload");
+    let mut file_data: Option<&[u8]> = None;
 
-    while let Some(field) = multipart.next_field().await.map_err(|e| {
-        err(StatusCode::BAD_REQUEST, &format!("Failed to read multipart field: {}", e))
-    })? {
-        let name = field.name().unwrap_or("").to_string();
-        if name == "file" || filename.is_none() {
-            filename = field.file_name().map(|s| s.to_string());
+    // 按 boundary 分割
+    let parts: Vec<&str> = body_str.split(&boundary_delim).collect();
+    for part in &parts[1..] {
+        if part.starts_with("--") { continue; } // 结束标记
 
-            // 防止路径遍历：只保留文件名部分
-            if let Some(ref fname) = filename {
-                safe_name = std::path::Path::new(fname)
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("upload")
-                    .to_string();
+        // 分离 headers 和 body（用 \r\n\r\n 分隔）
+        if let Some(header_end) = part.find("\r\n\r\n") {
+            let headers_str = &part[..header_end];
+            let body_part = &part[header_end + 4..];
+
+            // 查找 filename
+            if let Some(fn_start) = headers_str.find("filename=\"") {
+                let fn_rest = &headers_str[fn_start + 10..];
+                if let Some(fn_end) = fn_rest.find('\"') {
+                    let raw_filename = &fn_rest[..fn_end];
+                    safe_name = std::path::Path::new(raw_filename)
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("upload")
+                        .to_string();
+                }
             }
 
-            // 流式写入文件，避免大文件全部加载到内存
-            let path = format!("{}/{}", upload_dir, safe_name);
-            let mut file = tokio::fs::File::create(&path).await.map_err(|e| {
-                err(StatusCode::INTERNAL_SERVER_ERROR, &format!("Failed to create file: {}", e))
-            })?;
-
-            let mut stream = field;
-            while let Some(chunk) = stream.next().await {
-                let chunk = chunk.map_err(|e| {
-                    err(StatusCode::BAD_REQUEST, &format!("Failed to read file chunk: {}", e))
-                })?;
-                use tokio::io::AsyncWriteExt;
-                file.write_all(&chunk).await.map_err(|e| {
-                    err(StatusCode::INTERNAL_SERVER_ERROR, &format!("Failed to write file: {}", e))
-                })?;
-                total_bytes += chunk.len() as u64;
-            }
-
-            file_written = true;
-            if name == "file" {
-                break;
-            }
+            // 去掉末尾的 \r\n
+            let body_bytes_part = body_part.as_bytes();
+            let body_trimmed = if body_bytes_part.ends_with(b"\r\n") {
+                &body_bytes_part[..body_bytes_part.len() - 2]
+            } else {
+                body_bytes_part
+            };
+            file_data = Some(body_trimmed);
+            break;
         }
     }
 
-    if !file_written {
-        return Err(err(StatusCode::BAD_REQUEST, "No file provided"));
-    }
+    let data = file_data.ok_or_else(|| err(StatusCode::BAD_REQUEST, "No file found in multipart data"))?;
+    let path = format!("{}/{}", upload_dir, safe_name);
+    tokio::fs::write(&path, data).await.map_err(|e| {
+        err(StatusCode::INTERNAL_SERVER_ERROR, &format!("Failed to write file: {}", e))
+    })?;
 
-    tracing::info!("File uploaded: {} ({} bytes)", safe_name, total_bytes);
+    tracing::info!("File uploaded: {} ({} bytes)", safe_name, data.len());
 
     Ok(Json(MessageResponse {
         message: format!("File uploaded: {}", safe_name),
