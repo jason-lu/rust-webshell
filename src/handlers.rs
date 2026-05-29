@@ -1,4 +1,5 @@
 use axum::{extract::{Multipart, State}, http::{HeaderMap, StatusCode}, Json};
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -200,9 +201,17 @@ pub async fn upload_file(
     let _claims = auth::verify_token(token, &config.jwt_secret)
         .ok_or_else(|| err(StatusCode::UNAUTHORIZED, "Invalid or expired token"))?;
 
-    // 从 multipart 表单中读取文件字段
+    // 从 multipart 表单中读取文件字段，流式写入磁盘
     let mut filename: Option<String> = None;
-    let mut data: Option<Vec<u8>> = None;
+    let mut file_written = false;
+
+    let upload_dir = "/root/uploads";
+    tokio::fs::create_dir_all(upload_dir).await.map_err(|e| {
+        err(StatusCode::INTERNAL_SERVER_ERROR, &format!("Failed to create upload dir: {}", e))
+    })?;
+
+    let mut total_bytes: u64 = 0;
+    let mut safe_name = String::from("upload");
 
     while let Some(field) = multipart.next_field().await.map_err(|e| {
         err(StatusCode::BAD_REQUEST, &format!("Failed to read multipart field: {}", e))
@@ -210,38 +219,46 @@ pub async fn upload_file(
         let name = field.name().unwrap_or("").to_string();
         if name == "file" || filename.is_none() {
             filename = field.file_name().map(|s| s.to_string());
-            data = Some(field.bytes().await.map_err(|e| {
-                err(StatusCode::BAD_REQUEST, &format!("Failed to read file data: {}", e))
-            })?.to_vec());
+
+            // 防止路径遍历：只保留文件名部分
+            if let Some(ref fname) = filename {
+                safe_name = std::path::Path::new(fname)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("upload")
+                    .to_string();
+            }
+
+            // 流式写入文件，避免大文件全部加载到内存
+            let path = format!("{}/{}", upload_dir, safe_name);
+            let mut file = tokio::fs::File::create(&path).await.map_err(|e| {
+                err(StatusCode::INTERNAL_SERVER_ERROR, &format!("Failed to create file: {}", e))
+            })?;
+
+            let mut stream = field;
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk.map_err(|e| {
+                    err(StatusCode::BAD_REQUEST, &format!("Failed to read file chunk: {}", e))
+                })?;
+                use tokio::io::AsyncWriteExt;
+                file.write_all(&chunk).await.map_err(|e| {
+                    err(StatusCode::INTERNAL_SERVER_ERROR, &format!("Failed to write file: {}", e))
+                })?;
+                total_bytes += chunk.len() as u64;
+            }
+
+            file_written = true;
             if name == "file" {
                 break;
             }
         }
     }
 
-    let filename = filename.ok_or_else(|| err(StatusCode::BAD_REQUEST, "No file provided"))?;
-    let data = data.ok_or_else(|| err(StatusCode::BAD_REQUEST, "No file data"))?;
+    if !file_written {
+        return Err(err(StatusCode::BAD_REQUEST, "No file provided"));
+    }
 
-    // 防止路径遍历：只保留文件名部分
-    let safe_name = std::path::Path::new(&filename)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("upload")
-        .to_string();
-
-    // 创建上传目录
-    let upload_dir = "/root/uploads";
-    tokio::fs::create_dir_all(upload_dir).await.map_err(|e| {
-        err(StatusCode::INTERNAL_SERVER_ERROR, &format!("Failed to create upload dir: {}", e))
-    })?;
-
-    // 写入文件
-    let path = format!("{}/{}", upload_dir, safe_name);
-    tokio::fs::write(&path, &data).await.map_err(|e| {
-        err(StatusCode::INTERNAL_SERVER_ERROR, &format!("Failed to write file: {}", e))
-    })?;
-
-    tracing::info!("File uploaded: {} ({} bytes)", safe_name, data.len());
+    tracing::info!("File uploaded: {} ({} bytes)", safe_name, total_bytes);
 
     Ok(Json(MessageResponse {
         message: format!("File uploaded: {}", safe_name),
