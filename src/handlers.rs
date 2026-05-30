@@ -1,5 +1,4 @@
 use axum::{extract::{Request, State}, http::{HeaderMap, StatusCode}, Json, body::Body};
-use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -10,6 +9,7 @@ use crate::auth;
 
 /// 注册请求体
 #[derive(Deserialize)]
+#[allow(dead_code)]
 pub struct RegisterRequest {
     pub username: String, // 用户名
     pub password: String, // 密码（明文，服务端会哈希）

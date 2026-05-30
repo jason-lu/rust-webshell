@@ -20,6 +20,7 @@ futures-util = "0.3"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 multer = "3"
+dotenvy = "0.15"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
