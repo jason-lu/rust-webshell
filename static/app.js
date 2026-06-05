@@ -193,21 +193,19 @@ function startShell() {
         }
     };
 
-    // 等容器布局完成后再 fit
+    // 强制浏览器 reflow，确保容器尺寸已计算
     const container = document.getElementById('terminal');
+    container.offsetWidth; // 触发 reflow
+
+    // fit 并监听后续变化
     const doFit = () => {
         fitAddon.fit();
         sendResize();
-        term.focus();
     };
+    doFit();
+    term.focus();
 
-    // ResizeObserver 会在 observe 时立即触发一次（如果有尺寸）
-    // 用两次 rAF 确保 DOM 完全渲染
-    const observer = new ResizeObserver(() => {
-        requestAnimationFrame(() => {
-            requestAnimationFrame(() => doFit());
-        });
-    });
+    const observer = new ResizeObserver(() => doFit());
     observer.observe(container);
     window.addEventListener('resize', () => doFit());
 
@@ -226,10 +224,12 @@ function startShell() {
     ws.onopen = () => {
         wsOpened = true;
         console.log('WebSocket connected');
-        // 连接建立后再 fit 一次并发送终端尺寸
+        // 连接建立后重新 fit 确保尺寸正确
         fitAddon.fit();
         sendResize();
         term.focus();
+        // 100ms 后再 fit 一次兜底
+        setTimeout(() => { fitAddon.fit(); sendResize(); }, 100);
     };
 
     ws.onmessage = (e) => {
