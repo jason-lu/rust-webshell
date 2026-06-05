@@ -193,21 +193,21 @@ function startShell() {
         }
     };
 
-    // 用 ResizeObserver 等容器尺寸稳定后再 fit
+    // 等容器布局完成后再 fit
     const container = document.getElementById('terminal');
-    let fitScheduled = false;
     const doFit = () => {
-        if (fitScheduled) return;
-        fitScheduled = true;
-        requestAnimationFrame(() => {
-            fitAddon.fit();
-            sendResize();
-            term.focus();
-            fitScheduled = false;
-        });
+        fitAddon.fit();
+        sendResize();
+        term.focus();
     };
 
-    const observer = new ResizeObserver(() => doFit());
+    // ResizeObserver 会在 observe 时立即触发一次（如果有尺寸）
+    // 用两次 rAF 确保 DOM 完全渲染
+    const observer = new ResizeObserver(() => {
+        requestAnimationFrame(() => {
+            requestAnimationFrame(() => doFit());
+        });
+    });
     observer.observe(container);
     window.addEventListener('resize', () => doFit());
 
@@ -226,6 +226,9 @@ function startShell() {
     ws.onopen = () => {
         wsOpened = true;
         console.log('WebSocket connected');
+        // 连接建立后再 fit 一次并发送终端尺寸
+        fitAddon.fit();
+        sendResize();
         term.focus();
     };
 
