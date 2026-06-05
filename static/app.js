@@ -193,20 +193,23 @@ function startShell() {
         }
     };
 
-    // Fit after layout is complete
-    requestAnimationFrame(() => {
-        fitAddon.fit();
-        sendResize();
-        term.focus();
-        setTimeout(() => {
+    // 用 ResizeObserver 等容器尺寸稳定后再 fit
+    const container = document.getElementById('terminal');
+    let fitScheduled = false;
+    const doFit = () => {
+        if (fitScheduled) return;
+        fitScheduled = true;
+        requestAnimationFrame(() => {
             fitAddon.fit();
             sendResize();
-        }, 100);
-    });
-    window.addEventListener('resize', () => {
-        fitAddon.fit();
-        sendResize();
-    });
+            term.focus();
+            fitScheduled = false;
+        });
+    };
+
+    const observer = new ResizeObserver(() => doFit());
+    observer.observe(container);
+    window.addEventListener('resize', () => doFit());
 
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     ws = new WebSocket(`${proto}//${location.host}/webshell/api/ws/shell?token=${token}`);
