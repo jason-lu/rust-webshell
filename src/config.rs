@@ -22,6 +22,11 @@ impl Config {
         // 系统环境变量优先于 .env 文件中的值
         let _ = dotenvy::dotenv();
 
+        Self::from_current_env()
+    }
+
+    /// 从当前进程环境变量加载配置（不加载 .env 文件）
+    fn from_current_env() -> Self {
         Self {
             database_url: std::env::var("DATABASE_URL")
                 .expect("DATABASE_URL environment variable is required"),
@@ -48,7 +53,7 @@ mod tests {
         std::env::set_var("DATABASE_URL", "postgres://test:test@localhost/test");
         std::env::set_var("JWT_SECRET", "test-secret");
 
-        let config = Config::from_env();
+        let config = Config::from_current_env();
         assert_eq!(config.database_url, "postgres://test:test@localhost/test");
         assert_eq!(config.jwt_secret, "test-secret");
         assert_eq!(config.port, 3000);
@@ -60,7 +65,7 @@ mod tests {
         std::env::set_var("JWT_SECRET", "secret");
         std::env::set_var("PORT", "8080");
 
-        let config = Config::from_env();
+        let config = Config::from_current_env();
         assert_eq!(config.port, 8080);
 
         std::env::remove_var("PORT");
@@ -72,7 +77,7 @@ mod tests {
         std::env::set_var("JWT_SECRET", "secret");
         std::env::set_var("PORT", "invalid");
 
-        let config = Config::from_env();
+        let config = Config::from_current_env();
         assert_eq!(config.port, 3000); // 应该回退到默认值
 
         std::env::remove_var("PORT");
@@ -83,6 +88,6 @@ mod tests {
     fn test_config_panics_without_database_url() {
         std::env::remove_var("DATABASE_URL");
         std::env::remove_var("JWT_SECRET");
-        Config::from_env();
+        Config::from_current_env();
     }
 }
