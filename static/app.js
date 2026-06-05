@@ -186,12 +186,27 @@ function startShell() {
     term.loadAddon(fitAddon);
     term.open(document.getElementById('terminal'));
 
-    // Fit after a short delay to ensure DOM is ready
-    setTimeout(() => {
+    // 发送 resize 消息到后端
+    const sendResize = () => {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(new TextEncoder().encode(JSON.stringify({ cols: term.cols, rows: term.rows })));
+        }
+    };
+
+    // Fit after layout is complete
+    requestAnimationFrame(() => {
         fitAddon.fit();
+        sendResize();
         term.focus();
-    }, 200);
-    window.addEventListener('resize', () => fitAddon.fit());
+        setTimeout(() => {
+            fitAddon.fit();
+            sendResize();
+        }, 100);
+    });
+    window.addEventListener('resize', () => {
+        fitAddon.fit();
+        sendResize();
+    });
 
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     ws = new WebSocket(`${proto}//${location.host}/webshell/api/ws/shell?token=${token}`);

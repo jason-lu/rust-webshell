@@ -9,33 +9,24 @@ use axum::{
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use sqlx::PgPool;
-use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::process::Command;
 use tokio::sync::mpsc;
 
 use crate::auth;
 
 /// WebSocket 查询参数
-/// 
-/// 通过 URL query string 传递 JWT token 进行认证
-/// 例如: ws://host/api/ws/shell?token=xxx
 #[derive(Deserialize)]
 pub struct WsQuery {
-    pub token: Option<String>, // JWT token
+    pub token: Option<String>,
+}
+
+/// 客户端发来的终端 resize 消息
+#[derive(Deserialize)]
+struct ResizeMsg {
+    cols: u16,
+    rows: u16,
 }
 
 /// WebSocket 终端升级处理器
-/// 
-/// 验证 token 后将 HTTP 连接升级为 WebSocket
-/// 
-/// # 参数
-/// - ws: WebSocket 升级器
-/// - query: URL 查询参数（包含 token）
-/// - pool: 数据库连接池
-/// 
-/// # 返回
-/// - 成功: WebSocket 升级响应
-/// - 失败: 401 Unauthorized
 pub async fn ws_shell_handler(
     ws: WebSocketUpgrade,
     Query(query): Query<WsQuery>,
@@ -44,7 +35,6 @@ pub async fn ws_shell_handler(
     let token = query.token.unwrap_or_default();
     let config = crate::config::Config::from_env();
 
-    // 验证 JWT token
     let claims = match auth::verify_token(&token, &config.jwt_secret) {
         Some(c) => c,
         None => {
@@ -55,7 +45,6 @@ pub async fn ws_shell_handler(
         }
     };
 
-    // 检查用户是否存在于数据库
     let exists: (bool,) = sqlx::query_as(
         "SELECT EXISTS(SELECT 1 FROM users WHERE id = $1::uuid)",
     )
@@ -71,94 +60,98 @@ pub async fn ws_shell_handler(
             .unwrap();
     }
 
-    // 升级为 WebSocket 连接
     ws.on_upgrade(move |socket| handle_shell_socket(socket, claims.username))
 }
 
-/// 处理 WebSocket 终端会话
-/// 
-/// 创建一个 bash 子进程，将 WebSocket 与子进程的 stdin/stdout/stderr 双向桥接：
-/// 
-/// 数据流：
-///   客户端 → WebSocket → stdin → bash 子进程
-///   bash 子进程 → stdout/stderr → WebSocket → 客户端
-/// 
-/// 使用 `script` 命令包装 bash，以获得正确的终端行为（如颜色、行编辑等）
-/// 
-/// # 参数
-/// - socket: WebSocket 连接
-/// - username: 用户名（用于日志）
+/// 处理 WebSocket 终端会话（使用 libc PTY，支持动态 resize）
 async fn handle_shell_socket(socket: WebSocket, username: String) {
     tracing::info!("Shell session started for user: {}", username);
 
-    // 使用 script 命令创建伪终端（PTY），-q 静默，-f 立即刷新，-c 指定命令
-    let mut cmd = Command::new("script");
-    cmd.arg("-qfc")
-        .arg("/bin/bash --login")  // 启动登录 shell
-        .arg("/dev/null")          // 不保存 script 输出
-        .env("TERM", "xterm-256color")  // 终端类型
-        .env("SHELL", "/bin/bash")
-        .env("USER", "root")
-        .env("HOME", "/root")
-        .current_dir("/root")      // 初始工作目录
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
+    // 创建 PTY pair
+    let mut master_fd: i32 = -1;
+    let mut slave_fd: i32 = -1;
+    let ret = unsafe { libc::openpty(&mut master_fd, &mut slave_fd, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut()) };
+    if ret != 0 {
+        tracing::error!("Failed to open PTY: {}", std::io::Error::last_os_error());
+        return;
+    }
 
-    // 启动子进程
-    let mut child = cmd.spawn().expect("Failed to spawn shell");
+    // 设置初始终端大小
+    let mut winsize = libc::winsize {
+        ws_row: 24,
+        ws_col: 80,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    unsafe { libc::ioctl(master_fd, libc::TIOCSWINSZ, &mut winsize); }
 
-    // 获取子进程的 stdin/stdout/stderr 句柄
-    let stdin = child.stdin.take().unwrap();
-    let stdout = child.stdout.take().unwrap();
-    let stderr = child.stderr.take().unwrap();
+    // Fork 子进程
+    let pid = unsafe { libc::fork() };
+    if pid < 0 {
+        tracing::error!("Failed to fork: {}", std::io::Error::last_os_error());
+        unsafe { libc::close(master_fd); libc::close(slave_fd); }
+        return;
+    }
 
-    // 拆分 WebSocket 为发送端和接收端
+    if pid == 0 {
+        // === 子进程 ===
+        unsafe {
+            libc::close(master_fd);
+
+            // 创建新会话
+            libc::setsid();
+
+            // 设置 slave 为控制终端
+            libc::ioctl(slave_fd, libc::TIOCSCTTY, 0);
+
+            // 重定向 stdin/stdout/stderr 到 slave
+            libc::dup2(slave_fd, 0);
+            libc::dup2(slave_fd, 1);
+            libc::dup2(slave_fd, 2);
+            if slave_fd > 2 {
+                libc::close(slave_fd);
+            }
+
+            // 设置环境变量
+            libc::setenv(b"TERM\0".as_ptr().cast(), b"xterm-256color\0".as_ptr().cast(), 1);
+            libc::setenv(b"SHELL\0".as_ptr().cast(), b"/bin/bash\0".as_ptr().cast(), 1);
+            libc::setenv(b"USER\0".as_ptr().cast(), b"root\0".as_ptr().cast(), 1);
+            libc::setenv(b"HOME\0".as_ptr().cast(), b"/root\0".as_ptr().cast(), 1);
+
+            libc::chdir(b"/root\0".as_ptr().cast());
+
+            // 启动 bash
+            libc::execlp(b"/bin/bash\0".as_ptr().cast(), b"bash\0".as_ptr().cast(), b"--login\0".as_ptr().cast::<libc::c_char>(), std::ptr::null::<libc::c_char>());
+            libc::_exit(127);
+        }
+    }
+
+    // === 父进程 ===
+    unsafe { libc::close(slave_fd); }
+
+    // 包装 master fd 为 OwnedFd（用于自动关闭）
+    // 不需要，我们手动管理
+    let master_raw = master_fd;
+    let child_pid = pid;
+
+    // 拆分 WebSocket
     let (mut ws_sender, mut ws_receiver) = socket.split();
-    
-    // stdin 需要被多个任务共享，使用 Arc<Mutex> 包装
-    let stdin = std::sync::Arc::new(tokio::sync::Mutex::new(stdin));
-
-    // 创建通道，将 stdout 和 stderr 合并到一个发送端
     let (tx, mut rx) = mpsc::channel::<Bytes>(64);
 
-    // 任务1: 读取子进程 stdout，发送到通道
-    let tx_stdout = tx.clone();
-    let stdout_task = tokio::spawn(async move {
-        let mut reader = BufReader::new(stdout);
-        let mut buf = vec![0u8; 4096]; // 4KB 缓冲区
+    // 任务1: 读取 PTY master -> 通道
+    let tx_out = tx.clone();
+    let stdout_task = tokio::task::spawn_blocking(move || {
+        let mut buf = vec![0u8; 8192];
         loop {
-            match reader.read(&mut buf).await {
-                Ok(0) => break, // EOF
-                Ok(n) => {
-                    // 发送到通道，失败则退出
-                    if tx_stdout.send(Bytes::copy_from_slice(&buf[..n])).await.is_err() {
-                        break;
-                    }
-                }
-                Err(_) => break,
+            let n = unsafe { libc::read(master_raw, buf.as_mut_ptr().cast(), buf.len()) };
+            if n <= 0 { break; }
+            if tx_out.blocking_send(Bytes::copy_from_slice(&buf[..n as usize])).is_err() {
+                break;
             }
         }
     });
 
-    // 任务2: 读取子进程 stderr，发送到通道
-    let stderr_task = tokio::spawn(async move {
-        let mut reader = BufReader::new(stderr);
-        let mut buf = vec![0u8; 4096];
-        loop {
-            match reader.read(&mut buf).await {
-                Ok(0) => break,
-                Ok(n) => {
-                    if tx.send(Bytes::copy_from_slice(&buf[..n])).await.is_err() {
-                        break;
-                    }
-                }
-                Err(_) => break,
-            }
-        }
-    });
-
-    // 任务3: 从通道读取数据，发送到 WebSocket
+    // 任务2: 通道 -> WebSocket
     let ws_send_task = tokio::spawn(async move {
         while let Some(data) = rx.recv().await {
             if ws_sender.send(Message::Binary(data)).await.is_err() {
@@ -167,44 +160,57 @@ async fn handle_shell_socket(socket: WebSocket, username: String) {
         }
     });
 
-    // 任务4: 从 WebSocket 读取消息，写入子进程 stdin
+    // 任务3: WebSocket -> PTY master（支持 resize 消息）
     let stdin_task = {
-        let stdin = stdin.clone();
+        let master_raw = master_raw;
         tokio::spawn(async move {
             while let Some(msg) = ws_receiver.next().await {
                 match msg {
                     Ok(Message::Binary(data)) => {
-                        let mut stdin = stdin.lock().await;
-                        if stdin.write_all(&data).await.is_err() {
-                            break;
+                        // 尝试解析为 resize 消息
+                        if data.len() > 2 && data[0] == b'{' {
+                            if let Ok(text) = std::str::from_utf8(&data) {
+                                if let Ok(rm) = serde_json::from_str::<ResizeMsg>(text) {
+                                    let ws = libc::winsize {
+                                        ws_row: rm.rows,
+                                        ws_col: rm.cols,
+                                        ws_xpixel: 0,
+                                        ws_ypixel: 0,
+                                    };
+                                    unsafe {
+                                        libc::ioctl(master_raw, libc::TIOCSWINSZ, &ws);
+                                        libc::kill(child_pid, libc::SIGWINCH);
+                                    }
+                                    continue;
+                                }
+                            }
                         }
-                        let _ = stdin.flush().await;
+                        unsafe { libc::write(master_raw, data.as_ptr().cast(), data.len()); }
                     }
                     Ok(Message::Text(text)) => {
-                        let mut stdin = stdin.lock().await;
-                        if stdin.write_all(text.as_bytes()).await.is_err() {
-                            break;
-                        }
-                        let _ = stdin.flush().await;
+                        unsafe { libc::write(master_raw, text.as_ptr().cast(), text.len()); }
                     }
-                    Ok(Message::Close(_)) => break, // 客户端关闭连接
+                    Ok(Message::Close(_)) => break,
                     Err(_) => break,
-                    _ => {} // 忽略其他消息类型
+                    _ => {}
                 }
             }
         })
     };
 
-    // 等待任意一个任务结束（通常是客户端断开或子进程退出）
+    // 等待任意任务结束
     tokio::select! {
         _ = stdout_task => {},
-        _ = stderr_task => {},
         _ = ws_send_task => {},
         _ = stdin_task => {},
     }
 
-    // 杀死子进程，清理资源
-    let _ = child.kill().await;
+    // 清理
+    unsafe {
+        libc::kill(child_pid, libc::SIGTERM);
+        libc::waitpid(child_pid, std::ptr::null_mut(), 0);
+        libc::close(master_raw);
+    }
     tracing::info!("Shell session ended for user: {}", username);
 }
 
