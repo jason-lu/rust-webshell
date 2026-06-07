@@ -11,7 +11,7 @@ use axum::{
     routing::{get, post},
 };
 use tower_http::cors::CorsLayer;
-use tower_http::services::ServeDir;
+use tower_http::services::{ServeDir, ServeFile};
 use tracing_subscriber;
 
 /// 程序入口
@@ -44,8 +44,11 @@ async fn main() {
         .route("/api/upload", post(handlers::upload_file))              // 文件上传
         // WebSocket 终端接口
         .route("/api/ws/shell", get(ws::ws_shell_handler))
-        // 静态文件服务（前端页面），作为兜底路由
-        .fallback_service(ServeDir::new("/usr/local/share/webshell/static"))
+        // 静态文件服务（前端页面），SPA fallback：非文件路径返回 index.html
+        .fallback_service(
+            ServeDir::new("/usr/local/share/webshell/static")
+                .fallback(ServeFile::new("/usr/local/share/webshell/static/index.html"))
+        )
         // 允许跨域（开发时方便前端调用）
         .layer(CorsLayer::permissive())
         // 禁用默认 body 大小限制（由 nginx 控制）
