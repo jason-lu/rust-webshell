@@ -47,7 +47,7 @@ npm run build                  # Production build → ../static/
 - JWT is passed as `Authorization: Bearer <token>` for HTTP, `?token=<jwt>` for WebSocket
 - Registration is disabled; users are added directly in the database
 - Environment variables are loaded from `.env` via dotenvy
-- Static files are committed as build output in `static/`
+- Static files are build output in `static/`, not committed (in `.gitignore`)
 
 ## Testing
 
