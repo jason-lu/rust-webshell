@@ -1,12 +1,15 @@
 <script setup lang="ts">
 import { ref, onMounted, onBeforeUnmount } from 'vue'
+import { useRouter } from 'vue-router'
 import { Terminal as XTerminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
 import { useAuthStore } from '@/stores/auth'
 
 const auth = useAuthStore()
+const router = useRouter()
 const termEl = ref<HTMLDivElement | null>(null)
+let connected = false
 
 // Context menu state
 const menuVisible = ref(false)
@@ -62,6 +65,7 @@ function connectWebSocket() {
   ws.binaryType = 'arraybuffer'
 
   ws.onopen = () => {
+    connected = true
     if (term && fitAddon) {
       fitAddon.fit()
       const dims = fitAddon.proposeDimensions()
@@ -80,11 +84,20 @@ function connectWebSocket() {
   }
 
   ws.onclose = () => {
+    if (!connected) {
+      // WebSocket 握手失败（很可能是 token 过期/无效，服务端返回 401）
+      auth.logout()
+      router.push({ name: 'login' })
+      return
+    }
     term?.write('\r\n\x1b[31m[Connection closed]\x1b[0m\r\n')
   }
 
   ws.onerror = () => {
-    auth.logout()
+    if (!connected) {
+      auth.logout()
+      router.push({ name: 'login' })
+    }
   }
 }
 
