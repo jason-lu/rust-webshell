@@ -10,11 +10,19 @@ const auth = useAuthStore()
 const router = useRouter()
 const termEl = ref<HTMLDivElement | null>(null)
 let connected = false
+let intentionalClose = false
 
 // Context menu state
 const menuVisible = ref(false)
 const menuX = ref(0)
 const menuY = ref(0)
+
+// Connection status
+const connStatus = ref<'connected' | 'reconnecting' | 'disconnected'>('disconnected')
+const reconnectAttempt = ref(0)
+const MAX_RECONNECT = 10
+const BASE_DELAY = 1000
+let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 
 let term: XTerminal | null = null
 let fitAddon: FitAddon | null = null
@@ -52,7 +60,23 @@ async function pasteClipboard() {
   hideContextMenu()
 }
 
+function scheduleReconnect() {
+  if (reconnectAttempt.value >= MAX_RECONNECT) {
+    connStatus.value = 'disconnected'
+    term?.write('\r\n\x1b[31m[Reconnect failed. Please refresh the page.]\x1b[0m\r\n')
+    return
+  }
+  const delay = Math.min(BASE_DELAY * Math.pow(2, reconnectAttempt.value), 30000)
+  reconnectAttempt.value++
+  reconnectTimer = setTimeout(() => {
+    term?.write(`\x1b[90m[Reconnect attempt ${reconnectAttempt.value}/${MAX_RECONNECT}...]\x1b[0m\r\n`)
+    connectWebSocket()
+  }, delay)
+}
+
 function disconnect() {
+  intentionalClose = true
+  if (reconnectTimer) clearTimeout(reconnectTimer)
   ws?.close()
   term?.dispose()
 }
@@ -66,12 +90,18 @@ function connectWebSocket() {
 
   ws.onopen = () => {
     connected = true
+    reconnectAttempt.value = 0
+    connStatus.value = 'connected'
     if (term && fitAddon) {
       fitAddon.fit()
       const dims = fitAddon.proposeDimensions()
       if (dims) {
         ws!.send(new TextEncoder().encode(JSON.stringify({ cols: dims.cols, rows: dims.rows })))
       }
+    }
+    // 清除重连提示
+    if (reconnectAttempt.value > 0) {
+      term?.write('\r\n\x1b[32m[Reconnected]\x1b[0m\r\n')
     }
   }
 
@@ -90,7 +120,12 @@ function connectWebSocket() {
       router.push({ name: 'login' })
       return
     }
-    term?.write('\r\n\x1b[31m[Connection closed]\x1b[0m\r\n')
+    connected = false
+    if (intentionalClose) return
+    // 连接意外断开 — 尝试自动重连
+    connStatus.value = 'reconnecting'
+    term?.write('\r\n\x1b[33m[Connection lost, reconnecting...]\x1b[0m\r\n')
+    scheduleReconnect()
   }
 
   ws.onerror = () => {
@@ -152,7 +187,15 @@ defineExpose({ sendKey, disconnect })
 </script>
 
 <template>
-  <div ref="termEl" class="terminal-container"></div>
+  <div class="terminal-wrapper">
+    <div v-if="connStatus === 'reconnecting'" class="conn-banner reconnecting">
+      ⚠️ 连接已断开，正在重连...
+    </div>
+    <div v-if="connStatus === 'disconnected'" class="conn-banner disconnected">
+      ❌ 连接已断开，请刷新页面
+    </div>
+    <div ref="termEl" class="terminal-container"></div>
+  </div>
   <Teleport to="body">
     <div
       v-if="menuVisible"
@@ -170,6 +213,45 @@ defineExpose({ sendKey, disconnect })
 </template>
 
 <style scoped>
+.terminal-wrapper {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
+.terminal-container {
+  width: 100%;
+  height: 100%;
+}
+
+.conn-banner {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 10;
+  text-align: center;
+  padding: 6px 12px;
+  font-size: 13px;
+  font-family: system-ui, sans-serif;
+  animation: slideDown 0.3s ease-out;
+}
+
+.conn-banner.reconnecting {
+  background: rgba(255, 193, 7, 0.9);
+  color: #333;
+}
+
+.conn-banner.disconnected {
+  background: rgba(220, 53, 69, 0.9);
+  color: #fff;
+}
+
+@keyframes slideDown {
+  from { transform: translateY(-100%); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+
 .context-menu {
   position: fixed;
   background: #2d2d44;

@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use axum::{
     body::Bytes,
     extract::{
@@ -10,6 +12,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use sqlx::PgPool;
 use tokio::sync::mpsc;
+use tokio::time::{interval, Duration};
 
 use crate::auth;
 
@@ -31,6 +34,10 @@ struct PtyProcess {
     master_fd: i32,
     child_pid: i32,
 }
+
+/// 心跳配置
+const PING_INTERVAL: Duration = Duration::from_secs(30);
+const PONG_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// 使用 libc 创建 PTY 并启动 bash（在阻塞线程中运行，避免 tokio 死锁）
 fn spawn_pty() -> Result<PtyProcess, String> {
@@ -129,7 +136,7 @@ pub async fn ws_shell_handler(
     ws.on_upgrade(move |socket| handle_shell_socket(socket, claims.username))
 }
 
-/// 处理 WebSocket 终端会话（支持动态 resize）
+/// 处理 WebSocket 终端会话（支持动态 resize + 心跳检测）
 async fn handle_shell_socket(socket: WebSocket, username: String) {
     tracing::info!("Shell session started for user: {}", username);
 
@@ -151,21 +158,50 @@ async fn handle_shell_socket(socket: WebSocket, username: String) {
 
     let (mut ws_sender, mut ws_receiver) = socket.split();
     let (tx, mut rx) = mpsc::channel::<Bytes>(64);
+    let pong_received = Arc::new(AtomicBool::new(true));
 
     // 任务1: 读取 PTY master -> 通道
     let tx_out = tx.clone();
     let read_task = tokio::spawn(pty_read_loop(master_fd, tx_out));
 
-    // 任务2: 通道 -> WebSocket
+    // 任务2: 通道/心跳 -> WebSocket（合并发送 + Ping 逻辑）
+    let pong_flag_send = pong_received.clone();
     let send_task = tokio::spawn(async move {
-        while let Some(data) = rx.recv().await {
-            if ws_sender.send(Message::Binary(data)).await.is_err() {
-                break;
+        let mut ping_timer = interval(PING_INTERVAL);
+        ping_timer.tick().await; // 跳过第一次立即触发
+        loop {
+            tokio::select! {
+                // PTY 数据 -> WebSocket
+                data = rx.recv() => {
+                    match data {
+                        Some(d) => {
+                            if ws_sender.send(Message::Binary(d)).await.is_err() {
+                                break;
+                            }
+                        }
+                        None => break, // PTY 通道关闭
+                    }
+                }
+                // 定时发送 Ping
+                _ = ping_timer.tick() => {
+                    if ws_sender.send(Message::Ping(Bytes::new())).await.is_err() {
+                        break;
+                    }
+                    // 等待 Pong 响应
+                    pong_flag_send.store(false, Ordering::Relaxed);
+                    tokio::time::sleep(PONG_TIMEOUT).await;
+                    if !pong_flag_send.load(Ordering::Relaxed) {
+                        tracing::warn!("Pong timeout for user, closing connection");
+                        let _ = ws_sender.send(Message::Close(None)).await;
+                        break;
+                    }
+                }
             }
         }
     });
 
-    // 任务3: WebSocket -> PTY master（支持 resize 消息）
+    // 任务3: WebSocket -> PTY master（支持 resize 消息 + Pong 响应）
+    let pong_flag_recv = pong_received.clone();
     let write_task = tokio::spawn(async move {
         while let Some(msg) = ws_receiver.next().await {
             match msg {
@@ -192,6 +228,9 @@ async fn handle_shell_socket(socket: WebSocket, username: String) {
                 }
                 Ok(Message::Text(text)) => {
                     unsafe { libc::write(master_fd, text.as_ptr().cast(), text.len()); }
+                }
+                Ok(Message::Pong(_)) => {
+                    pong_flag_recv.store(true, Ordering::Relaxed);
                 }
                 Ok(Message::Close(_)) => break,
                 Err(_) => break,
