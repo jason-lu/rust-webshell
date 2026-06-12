@@ -38,6 +38,10 @@ struct PtyProcess {
 /// 心跳配置
 const PING_INTERVAL: Duration = Duration::from_secs(30);
 const PONG_TIMEOUT: Duration = Duration::from_secs(10);
+/// 会话最大存活时间（防止僵尸连接）
+const SESSION_TIMEOUT: Duration = Duration::from_secs(3600); // 1小时
+/// 清理超时
+const CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// 使用 libc 创建 PTY 并启动 bash（在阻塞线程中运行，避免 tokio 死锁）
 fn spawn_pty() -> Result<PtyProcess, String> {
@@ -86,17 +90,15 @@ fn spawn_pty() -> Result<PtyProcess, String> {
 }
 
 /// 在阻塞线程中同步读取 PTY master
-async fn pty_read_loop(master_fd: i32, tx: mpsc::Sender<Bytes>) {
-    tokio::task::spawn_blocking(move || {
-        let mut buf = vec![0u8; 8192];
-        loop {
-            let n = unsafe { libc::read(master_fd, buf.as_mut_ptr().cast(), buf.len()) };
-            if n <= 0 { break; }
-            if tx.blocking_send(Bytes::copy_from_slice(&buf[..n as usize])).is_err() {
-                break;
-            }
+fn pty_read_blocking(master_fd: i32, tx: mpsc::Sender<Bytes>) {
+    let mut buf = vec![0u8; 8192];
+    loop {
+        let n = unsafe { libc::read(master_fd, buf.as_mut_ptr().cast(), buf.len()) };
+        if n <= 0 { break; }
+        if tx.blocking_send(Bytes::copy_from_slice(&buf[..n as usize])).is_err() {
+            break;
         }
-    }).await.ok();
+    }
 }
 
 /// WebSocket 终端升级处理器
@@ -160,13 +162,13 @@ async fn handle_shell_socket(socket: WebSocket, username: String) {
     let (tx, mut rx) = mpsc::channel::<Bytes>(64);
     let pong_received = Arc::new(AtomicBool::new(true));
 
-    // 任务1: 读取 PTY master -> 通道
+    // 任务1: 读取 PTY master -> 通道（在阻塞线程中）
     let tx_out = tx.clone();
-    let read_task = tokio::spawn(pty_read_loop(master_fd, tx_out));
+    let mut read_task = tokio::task::spawn_blocking(move || pty_read_blocking(master_fd, tx_out));
 
     // 任务2: 通道/心跳 -> WebSocket（合并发送 + Ping 逻辑）
     let pong_flag_send = pong_received.clone();
-    let send_task = tokio::spawn(async move {
+    let mut send_task = tokio::spawn(async move {
         let mut ping_timer = interval(PING_INTERVAL);
         ping_timer.tick().await; // 跳过第一次立即触发
         loop {
@@ -202,7 +204,7 @@ async fn handle_shell_socket(socket: WebSocket, username: String) {
 
     // 任务3: WebSocket -> PTY master（支持 resize 消息 + Pong 响应）
     let pong_flag_recv = pong_received.clone();
-    let write_task = tokio::spawn(async move {
+    let mut write_task = tokio::spawn(async move {
         while let Some(msg) = ws_receiver.next().await {
             match msg {
                 Ok(Message::Binary(data)) => {
@@ -239,20 +241,47 @@ async fn handle_shell_socket(socket: WebSocket, username: String) {
         }
     });
 
-    // 等待任意任务结束
+    // 等待任意任务结束或会话超时
     tokio::select! {
-        _ = read_task => {},
-        _ = send_task => {},
-        _ = write_task => {},
+        _ = &mut read_task => {},
+        _ = &mut send_task => {},
+        _ = &mut write_task => {},
+        _ = tokio::time::sleep(SESSION_TIMEOUT) => {
+            tracing::warn!("Session timeout for user: {}", username);
+        },
     }
 
-    // 清理
+    // 立即 abort 其余任务，防止阻塞线程泄漏
+    read_task.abort();
+    send_task.abort();
+    write_task.abort();
+
+    // 清理 PTY 进程（带超时，防止卡死）
+    cleanup_pty(child_pid, master_fd);
+    tracing::info!("Shell session ended for user: {}", username);
+}
+
+/// 非阻塞清理 PTY 进程：先 SIGTERM，等一会，没死就 SIGKILL
+fn cleanup_pty(child_pid: i32, master_fd: i32) {
     unsafe {
         libc::kill(child_pid, libc::SIGTERM);
-        libc::waitpid(child_pid, std::ptr::null_mut(), 0);
+
+        // 非阻塞等待，最多等 CLEANUP_TIMEOUT
+        let deadline = std::time::Instant::now() + CLEANUP_TIMEOUT;
+        loop {
+            let mut status: i32 = 0;
+            let ret = libc::waitpid(child_pid, &mut status, libc::WNOHANG);
+            if ret != 0 { break; } // 已退出或错误
+            if std::time::Instant::now() >= deadline {
+                tracing::warn!("Child {} did not exit after SIGTERM, sending SIGKILL", child_pid);
+                libc::kill(child_pid, libc::SIGKILL);
+                libc::waitpid(child_pid, &mut status, 0); // SIGKILL 后必须 wait
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
         libc::close(master_fd);
     }
-    tracing::info!("Shell session ended for user: {}", username);
 }
 
 #[cfg(test)]
