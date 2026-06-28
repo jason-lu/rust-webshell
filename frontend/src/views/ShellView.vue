@@ -6,6 +6,7 @@ import Terminal from '@/components/Terminal.vue'
 import VirtualKeyboard from '@/components/VirtualKeyboard.vue'
 import ChangePassword from '@/components/ChangePassword.vue'
 import FileUpload from '@/components/FileUpload.vue'
+import FileList from '@/components/FileList.vue'
 
 const router = useRouter()
 const auth = useAuthStore()
@@ -14,6 +15,7 @@ const terminalRef = ref<InstanceType<typeof Terminal> | null>(null)
 const showKeyboard = ref(false)
 const showChangePassword = ref(false)
 const showFileUpload = ref(false)
+const showFileList = ref(false)
 
 function sendKey(key: string) {
   terminalRef.value?.sendKey(key)
@@ -33,6 +35,7 @@ function logout() {
       <button @click="showKeyboard = !showKeyboard">Keyboard</button>
       <button @click="showChangePassword = true">Password</button>
       <button @click="showFileUpload = true">Upload</button>
+      <button @click="showFileList = true">Files</button>
       <button @click="logout" class="logout-btn">Logout</button>
     </div>
 
@@ -47,6 +50,10 @@ function logout() {
     <FileUpload
       v-if="showFileUpload"
       @close="showFileUpload = false"
+    />
+    <FileList
+      v-if="showFileList"
+      @close="showFileList = false"
     />
   </div>
 </template>

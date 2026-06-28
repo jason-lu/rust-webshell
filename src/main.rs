@@ -42,6 +42,8 @@ async fn main() {
         .route("/api/login", post(handlers::login))                // 登录，返回 JWT
         .route("/api/change-password", post(handlers::change_password))  // 修改密码
         .route("/api/upload", post(handlers::upload_file))              // 文件上传
+        .route("/api/files", get(handlers::list_files))                  // 文件列表
+        .route("/api/download", get(handlers::download_file))              // 文件下载
         // WebSocket 终端接口
         .route("/api/ws/shell", get(ws::ws_shell_handler))
         // 静态文件服务（前端页面），SPA fallback：非文件路径返回 index.html

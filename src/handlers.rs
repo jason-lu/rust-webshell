@@ -1,5 +1,6 @@
-use axum::{extract::{Request, State}, http::{HeaderMap, StatusCode}, Json, body::Body};
+use axum::{extract::{Request, State, Query}, http::{HeaderMap, StatusCode}, Json, body::Body, response::Response};
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -292,6 +293,186 @@ pub async fn upload_file(
     Ok(Json(MessageResponse {
         message: format!("File uploaded: {}", safe_name),
     }))
+}
+
+/// 文件列表响应体
+#[derive(Serialize)]
+pub struct FileEntry {
+    pub name: String,     // 文件名
+    pub size: u64,        // 文件大小（字节）
+    pub is_dir: bool,     // 是否为目录
+}
+
+/// 文件列表查询参数
+#[derive(Deserialize)]
+pub struct ListQuery {
+    pub path: Option<String>, // 可选子目录路径
+}
+
+/// 文件列表处理器
+///
+/// 列出 /root/uploads/ 下的文件和目录
+pub async fn list_files(
+    headers: HeaderMap,
+    Query(query): Query<ListQuery>,
+) -> Result<Json<Vec<FileEntry>>, (StatusCode, Json<MessageResponse>)> {
+    // 认证
+    let token = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .ok_or_else(|| err(StatusCode::UNAUTHORIZED, "Missing or invalid Authorization header"))?;
+
+    let config = crate::config::Config::from_env();
+    let _claims = auth::verify_token(token, &config.jwt_secret)
+        .ok_or_else(|| err(StatusCode::UNAUTHORIZED, "Invalid or expired token"))?;
+
+    let sub_path = query.path.unwrap_or_default();
+    if sub_path.contains("..") || sub_path.contains('\0') {
+        return Err(err(StatusCode::FORBIDDEN, "Invalid path"));
+    }
+
+    let dir_path = PathBuf::from("/root/uploads").join(&sub_path);
+    let canonical = dir_path.canonicalize().map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            err(StatusCode::NOT_FOUND, "Directory not found")
+        } else {
+            err(StatusCode::BAD_REQUEST, &format!("Invalid path: {}", e))
+        }
+    })?;
+
+    let upload_dir = PathBuf::from("/root/uploads");
+    if !canonical.starts_with(&upload_dir) {
+        return Err(err(StatusCode::FORBIDDEN, "Access denied"));
+    }
+
+    let mut entries = Vec::new();
+    let mut dir = tokio::fs::read_dir(&canonical).await.map_err(|e| {
+        err(StatusCode::INTERNAL_SERVER_ERROR, &format!("Failed to read directory: {}", e))
+    })?;
+
+    while let Some(entry) = dir.next_entry().await.map_err(|e| {
+        err(StatusCode::INTERNAL_SERVER_ERROR, &format!("Failed to read entry: {}", e))
+    })? {
+        let metadata = match entry.metadata().await {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        let name = entry.file_name().to_string_lossy().to_string();
+        entries.push(FileEntry {
+            name,
+            size: metadata.len(),
+            is_dir: metadata.is_dir(),
+        });
+    }
+
+    // 目录在前，文件在后，各自按名称排序
+    entries.sort_by(|a, b| {
+        if a.is_dir == b.is_dir {
+            a.name.to_lowercase().cmp(&b.name.to_lowercase())
+        } else if a.is_dir {
+            std::cmp::Ordering::Less
+        } else {
+            std::cmp::Ordering::Greater
+        }
+    });
+
+    Ok(Json(entries))
+}
+
+/// 文件下载查询参数
+#[derive(Deserialize)]
+pub struct DownloadQuery {
+    pub path: String,  // 文件路径（相对于 /root/uploads/）
+    pub token: Option<String>, // 可选的 JWT token（用于 <a> 标签下载）
+}
+
+/// 文件下载处理器
+///
+/// 验证 JWT token 后，返回指定文件供浏览器下载。
+/// 支持两种认证方式：Authorization header 或 ?token= 查询参数。
+///
+/// # 参数
+/// - headers: 请求头（提取 Authorization）
+/// - query: 查询参数，包含 path 和可选 token
+///
+/// # 返回
+/// - 成功: 文件流（带 Content-Disposition: attachment）
+/// - 失败: 401 Unauthorized、400 Bad Request、403 Forbidden 或 404 Not Found
+pub async fn download_file(
+    headers: HeaderMap,
+    Query(query): Query<DownloadQuery>,
+) -> Result<Response, (StatusCode, Json<MessageResponse>)> {
+    // 从 Authorization 头或查询参数提取 token
+    let token = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(|s| s.to_string())
+        .or(query.token)
+        .ok_or_else(|| err(StatusCode::UNAUTHORIZED, "Missing or invalid Authorization header"))?;
+
+    // 验证 JWT token
+    let config = crate::config::Config::from_env();
+    let _claims = auth::verify_token(&token, &config.jwt_secret)
+        .ok_or_else(|| err(StatusCode::UNAUTHORIZED, "Invalid or expired token"))?;
+
+    // 安全检查：禁止路径穿越
+    if query.path.contains("..") || query.path.contains('\0') {
+        return Err(err(StatusCode::FORBIDDEN, "Invalid path"));
+    }
+
+    // 拼接完整路径
+    let upload_dir = PathBuf::from("/root/uploads");
+    let file_path = upload_dir.join(&query.path);
+
+    // 确保路径仍在上传目录内
+    let canonical = file_path.canonicalize().map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            err(StatusCode::NOT_FOUND, "File not found")
+        } else {
+            err(StatusCode::BAD_REQUEST, &format!("Invalid path: {}", e))
+        }
+    })?;
+    if !canonical.starts_with(&upload_dir) {
+        return Err(err(StatusCode::FORBIDDEN, "Access denied"));
+    }
+
+    // 读取文件
+    let data = tokio::fs::read(&canonical).await.map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            err(StatusCode::NOT_FOUND, "File not found")
+        } else {
+            err(StatusCode::INTERNAL_SERVER_ERROR, &format!("Failed to read file: {}", e))
+        }
+    })?;
+
+    // 提取文件名
+    let filename = canonical
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("download");
+
+    // 推断 MIME 类型
+    let mime = mime_guess::from_path(&canonical)
+        .first_or_octet_stream()
+        .to_string();
+
+    tracing::info!("Download: {} ({} bytes, {})", filename, data.len(), mime);
+
+    // 构造响应
+    let response = Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", mime)
+        .header(
+            "Content-Disposition",
+            format!("attachment; filename=\"{}\"", filename),
+        )
+        .header("Content-Length", data.len())
+        .body(Body::from(data))
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &format!("Failed to build response: {}", e)))?;
+
+    Ok(response)
 }
 
 #[cfg(test)]

@@ -103,6 +103,7 @@ function connectWebSocket() {
     if (reconnectAttempt.value > 0) {
       term?.write('\r\n\x1b[32m[Reconnected]\x1b[0m\r\n')
     }
+    term?.focus()
   }
 
   ws.onmessage = (ev) => {
@@ -153,6 +154,7 @@ onMounted(() => {
   term.loadAddon(fitAddon)
   term.open(termEl.value)
   fitAddon.fit()
+  term.focus()
 
   // Right-click context menu for copy/paste
   termEl.value.addEventListener('contextmenu', showContextMenu)
